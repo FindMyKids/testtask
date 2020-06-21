@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
 	"math/rand"
 	"net/http"
 	"os"
+
 	"time"
+
+	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli"
 )
 
 func main() {
@@ -50,48 +53,61 @@ var child = cli.Command{
 }
 
 func childAction(c *cli.Context) error {
-	target := c.String(flagApi.Name)
-	var coords []Coordinate
-	err := json.Unmarshal([]byte(coordsJson), &coords)
-	if err != nil {
-		logrus.Fatal(err)
-	}
 	var leftTime time.Time
-
-	for _, coord := range coords {
-		time.Sleep(time.Millisecond * time.Duration(rand.Intn(100)))
-		if coord.Id == 205 {
-			leftTime = time.Now()
-		}
-		coord.ChildId = 1
-		if target == "" {
-			logrus.WithField("coord", coord).Info("target is empty")
-			continue
-		}
-		data, err := json.Marshal(coord)
+	var id int
+	go func() {
+		target := c.String(flagApi.Name)
+		var coords []Coordinate
+		err := json.Unmarshal([]byte(coordsJson), &coords)
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		buf := bytes.NewBuffer(data)
-		resp, err := http.Post(target, "application/json", buf)
-		if err != nil {
-			logrus.WithError(err).Fatalf("got error during request %s", target)
+
+		for _, coord := range coords {
+			id = coord.Id
+			time.Sleep(time.Millisecond * time.Duration(rand.Intn(100)))
+			if coord.Id == 205 {
+				leftTime = time.Now()
+			}
+			coord.ChildId = 1
+			if target == "" {
+				logrus.WithField("coord", coord).Info("target is empty")
+				continue
+			}
+			data, err := json.Marshal(coord)
+			if err != nil {
+				logrus.Fatal(err)
+			}
+			buf := bytes.NewBuffer(data)
+			resp, err := http.Post(target, "application/json", buf)
+			if err != nil {
+				logrus.WithError(err).Fatalf("got error during request %s", target)
+			}
+			if resp.StatusCode != http.StatusOK {
+				logrus.Fatalf("bad status code, expected %d got %d", http.StatusOK, resp.StatusCode)
+			}
+			logrus.Info("sent coord... Ok")
 		}
-		if resp.StatusCode != http.StatusOK {
-			logrus.Fatalf("bad status code, expected %d got %d", http.StatusOK, resp.StatusCode)
-		}
-		logrus.Info("sent coord... Ok")
-	}
-	srv := http.NewServeMux()
-	srv.HandleFunc("/notify/parent", func(writer http.ResponseWriter, request *http.Request) {
-		logrus.Info("got message that child has left place")
-		logrus.Infof("%f seconds passed since child has actually left place (he left on 205 coordinate)", time.Since(leftTime).Seconds())
-		writer.WriteHeader(http.StatusOK)
-		os.Exit(0)
-	})
+	}()
+
 	addr := c.String(flagAddr.Name)
+	handler := http.NewServeMux()
+	server := http.Server{Addr: addr, Handler: handler}
+
+	handler.HandleFunc("/notify/parent", func(writer http.ResponseWriter, request *http.Request) {
+		logrus.Info("got message that child has left place")
+		logrus.Infof("%f seconds passed since child has actually left place (he left on 205 coordinate) and now coordinate id = %v", time.Since(leftTime).Seconds(), id)
+		writer.WriteHeader(http.StatusOK)
+
+		go func() {
+			if err := server.Shutdown(context.Background()); err != nil {
+				logrus.Fatal(err)
+			}
+		}()
+	})
+
 	logrus.Infof("listening: %s/notify/parent", addr)
-	return http.ListenAndServe(addr, srv)
+	return server.ListenAndServe()
 }
 
 type Coordinate struct {
